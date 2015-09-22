@@ -1,8 +1,9 @@
 #!/bin/bash
-export TMP=/gdrive-lo1
+#export TMP=/gdrive-lo1
+export TMP=/tmp
 set -e
 
-for vm in `vboxmanage list vms | cut -f2 -d\{ | cut -f1 -d\} | egrep -v 'ca2c6867-d39b-46db-bd0c-be4200739cf3|0bc5b421-20dd-4d5a-bdb2-c30c8008bae6|774ce518-0b19-4b70-8f4d-e04202b10497'`
+for vm in `vboxmanage list vms | cut -f2 -d\{ | cut -f1 -d\} `
 do
 	freespace1=`df -k . | grep $PWD  | awk '{ print $4 }'`
 
