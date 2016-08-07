@@ -35,7 +35,11 @@ print "%d filenames, %d matches" % (len(filenames), len(matches))
 
 del_succ = 0
 del_fail = 0
+count = 0
 for f in matches:
+    if (count % 10) == 0:
+        print "deleting %d of %d, %.2lf" % (count, len(matches), (100.0*count)/len(matches))
+    count = count + 1 
     try:
         os.unlink(f)
         del_succ = del_succ + 1
