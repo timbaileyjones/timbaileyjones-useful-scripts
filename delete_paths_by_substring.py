@@ -10,25 +10,36 @@ import shutil
 print "sys.argv", sys.argv
 
 if len(sys.argv) < 3:
-    print "Usage: delete_paths_by_substring.py %s %s" % ("filename-list", "regex-to-delete")
+    print "Usage: delete_paths_by_substring.py %s %s" % ("filename-list", "file-of-regexes-to-delete")
     sys.exit(1)
 
-regex = re.compile(sys.argv[2])
+
+
+regexes=[]
+patterns2delete=[]
+with open(sys.argv[2]) as f:
+    patterns2delete = f.read().splitlines()
+    for pattern in patterns2delete:
+        r = re.compile(pattern)
+        regexes.append(r)
 
 filenames = []
 with open(sys.argv[1]) as f:
     filenames = f.read().splitlines()
 
 print "filename length", len(filenames)
-print "regex", regex
 
 matches = []
 nonmatches = []
+
 for f in filenames:
-    if regex.search(f):
-        print "matched ", f
-        matches.append(f)
-    else:
+    found = False
+    for i, r in enumerate(regexes):
+        if r.search(f):
+            print "matched regex %s: %s" % (patterns2delete[i], f)
+            matches.append(f)
+            found = True
+    if not found:
         nonmatches.append(f)
 
 print "%d filenames, %d matches" % (len(filenames), len(matches))
@@ -47,12 +58,28 @@ for f in matches:
         del_fail = del_fail + 1
 print
 
+#
+#  log the deletion stats for this run
+#
 with open("delete-by-regex.log", "a") as f:
-    f.write( "%s %d %d\n" % (sys.argv[2], del_succ, del_fail))
+    f.write( "%s %d %d\n" % (patterns2delete.__str__(), del_succ, del_fail))
 
 with open(".tmp", "w") as f:
     for line in nonmatches:
         f.write(line)
         f.write('\n')
-
 shutil.move(".tmp", sys.argv[1])
+
+#
+# rewrite patterns-to-delete file, skipping the patterns we just deleted
+#
+old_patterns2delete=[]
+with open(sys.argv[2]) as f:
+    old_patterns2delete = f.read().splitlines()
+with open(".tmp", "w") as f:
+    for line in old_patterns2delete:
+        if line not in patterns2delete:
+            f.write(line)
+            f.write('\n')
+
+shutil.move(".tmp", sys.argv[2])
