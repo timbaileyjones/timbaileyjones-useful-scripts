@@ -20,8 +20,9 @@ patterns2delete=[]
 with open(sys.argv[2]) as f:
     patterns2delete = f.read().splitlines()
     for pattern in patterns2delete:
-        r = re.compile(pattern)
-        regexes.append(r)
+        if len(pattern) > 8:
+            r = re.compile(pattern)
+            regexes.append(r)
 
 filenames = []
 with open(sys.argv[1]) as f:
@@ -36,9 +37,10 @@ for f in filenames:
     found = False
     for i, r in enumerate(regexes):
         if r.search(f):
-            print "matched regex %s: %s" % (patterns2delete[i], f)
+            #print "matched regex %s: %s" % (patterns2delete[i], f)
             matches.append(f)
             found = True
+            break
     if not found:
         nonmatches.append(f)
 
