@@ -1,0 +1,18 @@
+#!/bin/bash
+
+CMD="$*"
+
+echo CMD=$CMD
+
+declare -i count=0
+while :
+do
+  for seq in `seq 60`
+  do
+    OUTPUT=`$CMD`  
+    echo -n `date` $OUTPUT ; printf '\r' 
+    sleep 1
+  done
+  echo 
+done
+
