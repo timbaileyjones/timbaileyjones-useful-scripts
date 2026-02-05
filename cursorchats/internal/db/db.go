@@ -28,8 +28,19 @@ type metaRow struct {
 
 // chatBlobMessage is a JSON blob with role/content (chat message).
 type chatBlobMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"`
+}
+
+// contentPart is used when content is an array of parts (e.g. {"type":"text","text":"..."}).
+type contentPart struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// DumpOptions controls dump behavior (e.g. colorization).
+type DumpOptions struct {
+	Color bool
 }
 
 // dbEntry holds a path and its createdAt for sorting.
@@ -39,7 +50,10 @@ type dbEntry struct {
 }
 
 // DumpAll discovers all *.db under chatsDir, sorts by createdAt, and dumps each.
-func DumpAll(chatsDir string, out io.Writer) error {
+func DumpAll(chatsDir string, out io.Writer, opts *DumpOptions) error {
+	if opts == nil {
+		opts = &DumpOptions{}
+	}
 	entries, err := discoverDBs(chatsDir)
 	if err != nil {
 		return fmt.Errorf("discover: %w", err)
@@ -49,7 +63,7 @@ func DumpAll(chatsDir string, out io.Writer) error {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].CreatedAt < entries[j].CreatedAt })
 	for _, e := range entries {
-		if err := dumpOne(e.Path, out); err != nil {
+		if err := dumpOne(e.Path, out, opts); err != nil {
 			return fmt.Errorf("dump %s: %w", e.Path, err)
 		}
 	}
@@ -121,7 +135,7 @@ func openReadOnly(dbPath string) (*sql.DB, error) {
 	return sql.Open("sqlite", uri)
 }
 
-func dumpOne(dbPath string, out io.Writer) error {
+func dumpOne(dbPath string, out io.Writer, opts *DumpOptions) error {
 	conn, err := openReadOnly(dbPath)
 	if err != nil {
 		return err
@@ -176,29 +190,111 @@ func dumpOne(dbPath string, out io.Writer) error {
 		if err := blobRows.Scan(&id, &data); err != nil {
 			return err
 		}
-		line := formatBlob(id, data)
-		fmt.Fprintln(out, line)
+		lines := formatBlob(id, data, opts)
+		for _, line := range lines {
+			fmt.Fprintln(out, line)
+		}
 	}
 	return blobRows.Err()
 }
 
-func formatBlob(id string, data []byte) string {
+const maxPreviewLen = 800
+const maxExtractedLineLen = 400
+
+func formatBlob(id string, data []byte, opts *DumpOptions) []string {
+	color := opts != nil && opts.Color
+	roleColor := func(role string) (string, string) {
+		if !color {
+			return "", ""
+		}
+		switch role {
+		case "user":
+			return "\033[36m", "\033[0m" // cyan
+		case "assistant":
+			return "\033[32m", "\033[0m" // green
+		case "system":
+			return "\033[90m", "\033[0m" // dim
+		default:
+			return "\033[33m", "\033[0m" // yellow
+		}
+	}
+
 	if len(data) == 0 {
-		return fmt.Sprintf("[blob id=%s len=0]", id)
+		return []string{fmt.Sprintf("[blob id=%s len=0]", id)}
 	}
+
+	// Binary blob: try to extract UTF-8 strings (protobuf-like).
 	if !utf8.Valid(data) {
-		return fmt.Sprintf("[binary blob id=%s len=%d]", id, len(data))
+		extracted := ExtractStringsFromBinary(data)
+		if len(extracted) == 0 {
+			return []string{fmt.Sprintf("[binary blob id=%s len=%d]", id, len(data))}
+		}
+		lines := make([]string, 0, 1+len(extracted))
+		lines = append(lines, fmt.Sprintf("[binary blob id=%s len=%d] (extracted text below)", id, len(data)))
+		for _, s := range extracted {
+			if len(s) > maxExtractedLineLen {
+				s = s[:maxExtractedLineLen] + "..."
+			}
+			lines = append(lines, "  │ "+s)
+		}
+		return lines
 	}
+
+	// JSON blob
 	var msg chatBlobMessage
 	if json.Unmarshal(data, &msg) != nil {
-		return fmt.Sprintf("[blob id=%s len=%d]", id, len(data))
+		return []string{fmt.Sprintf("[blob id=%s len=%d]", id, len(data))}
 	}
-	if msg.Role != "" && msg.Content != "" {
-		preview := msg.Content
-		if len(preview) > 500 {
-			preview = preview[:500] + "..."
+
+	contentStr := extractContentString(msg.Content)
+	if msg.Role != "" && contentStr != "" {
+		preview := contentStr
+		if len(preview) > maxPreviewLen {
+			preview = preview[:maxPreviewLen] + "..."
 		}
-		return fmt.Sprintf("%s: %s", msg.Role, strings.TrimSpace(preview))
+		preview = strings.TrimSpace(preview)
+		open, close := roleColor(msg.Role)
+		line := open + msg.Role + close + ": " + preview
+		return []string{line}
 	}
-	return fmt.Sprintf("[blob id=%s len=%d]", id, len(data))
+
+	// JSON with other shape: show keys and content preview
+	if len(msg.Content) > 0 {
+		preview := string(msg.Content)
+		if len(preview) > 300 {
+			preview = preview[:300] + "..."
+		}
+		return []string{
+			fmt.Sprintf("[blob id=%s len=%d] (JSON, role=%q)", id, len(data), msg.Role),
+			"  │ " + preview,
+		}
+	}
+	return []string{fmt.Sprintf("[blob id=%s len=%d]", id, len(data))}
+}
+
+// extractContentString returns display text from content (string or array of parts).
+func extractContentString(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	// Try as string first
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	// Try as array of parts
+	var parts []contentPart
+	if json.Unmarshal(raw, &parts) != nil {
+		return ""
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		if p.Text != "" {
+			if b.Len() > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString(p.Text)
+		}
+	}
+	return b.String()
 }

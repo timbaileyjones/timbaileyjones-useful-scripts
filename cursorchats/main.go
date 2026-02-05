@@ -12,6 +12,7 @@ import (
 func main() {
 	chatsDir := flag.String("chats-dir", "", "Directory containing Cursor chat *.db files (default: $HOME/.cursor/chats)")
 	outputPath := flag.String("output", "", "Write output to file (default: stdout)")
+	colorFlag := flag.Bool("color", false, "Colorize output (roles and extracted text context)")
 	flag.Parse()
 
 	if *chatsDir == "" {
@@ -29,7 +30,8 @@ func main() {
 		out = f
 	}
 
-	if err := db.DumpAll(*chatsDir, out); err != nil {
+	opts := &db.DumpOptions{Color: *colorFlag}
+	if err := db.DumpAll(*chatsDir, out, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
