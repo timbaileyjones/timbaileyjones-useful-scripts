@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/alecthomas/chroma/v2/formatters"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 	_ "modernc.org/sqlite"
 )
 
@@ -258,18 +262,68 @@ func formatBlob(id string, data []byte, opts *DumpOptions) []string {
 		return []string{line}
 	}
 
-	// JSON with other shape: show keys and content preview
+	// JSON with other shape: pretty-print and optionally syntax-highlight
 	if len(msg.Content) > 0 {
-		preview := string(msg.Content)
-		if len(preview) > 300 {
-			preview = preview[:300] + "..."
+		pretty, err := prettyPrintJSON(msg.Content)
+		if err != nil {
+			pretty = string(msg.Content)
+			if len(pretty) > 500 {
+				pretty = pretty[:500] + "..."
+			}
 		}
-		return []string{
-			fmt.Sprintf("[blob id=%s len=%d] (JSON, role=%q)", id, len(data), msg.Role),
-			"  │ " + preview,
+		body := pretty
+		if color {
+			body = colorizeJSON(pretty)
 		}
+		lines := strings.Split(body, "\n")
+		out := make([]string, 0, 1+len(lines))
+		out = append(out, fmt.Sprintf("[blob id=%s len=%d] (JSON, role=%q)", id, len(data), msg.Role))
+		for _, line := range lines {
+			out = append(out, "  │ "+line)
+		}
+		return out
 	}
 	return []string{fmt.Sprintf("[blob id=%s len=%d]", id, len(data))}
+}
+
+// prettyPrintJSON indents raw JSON for readability.
+func prettyPrintJSON(raw []byte) (string, error) {
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return "", err
+	}
+	buf := new(bytes.Buffer)
+	enc := json.NewEncoder(buf)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(buf.String(), "\n"), nil
+}
+
+// colorizeJSON returns ANSI-colored JSON using chroma.
+func colorizeJSON(source string) string {
+	lexer := lexers.Get("json")
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+	style := styles.Get("monokai")
+	if style == nil {
+		style = styles.Fallback
+	}
+	formatter := formatters.Get("terminal16m")
+	if formatter == nil {
+		formatter = formatters.Fallback
+	}
+	it, err := lexer.Tokenise(nil, source)
+	if err != nil {
+		return source
+	}
+	var buf bytes.Buffer
+	if err := formatter.Format(&buf, style, it); err != nil {
+		return source
+	}
+	return buf.String()
 }
 
 // extractContentString returns display text from content (string or array of parts).

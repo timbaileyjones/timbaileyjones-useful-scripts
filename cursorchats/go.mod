@@ -1,10 +1,12 @@
 module github.com/timbaileyjones/cursorchats
 
-go 1.21
+go 1.22
 
 require modernc.org/sqlite v1.29.1
 
 require (
+	github.com/alecthomas/chroma/v2 v2.23.1 // indirect
+	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
