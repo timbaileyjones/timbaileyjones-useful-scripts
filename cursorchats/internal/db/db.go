@@ -46,7 +46,8 @@ type contentPart struct {
 
 // DumpOptions controls dump behavior (e.g. colorization).
 type DumpOptions struct {
-	Color bool
+	Color         bool
+	ByteDumpWidth int // bytes per line in byte dump; 0 = use defaultByteDumpWidth (76). Set from terminal width when stdout is a TTY.
 }
 
 // dbEntry holds a path and its createdAt for sorting.
@@ -132,6 +133,9 @@ func mtimeMs(path string) int64 {
 	return info.ModTime().UnixMilli()
 }
 
+// openReadOnly opens the SQLite database read-only. SQLite automatically uses
+// the matching -wal and -shm files in the same directory, so we see the latest
+// committed state including uncheckpointed WAL data (no extra handling needed).
 func openReadOnly(dbPath string) (*sql.DB, error) {
 	abs, err := filepath.Abs(dbPath)
 	if err != nil {
@@ -150,8 +154,8 @@ func dumpOne(dbPath string, out io.Writer, opts *DumpOptions) error {
 
 	fmt.Fprintf(out, "=== %s ===\n", dbPath)
 
-	// Meta table
-	rows, err := conn.Query("SELECT key, value FROM meta")
+	// Meta table (ORDER BY key for deterministic order)
+	rows, err := conn.Query("SELECT key, value FROM meta ORDER BY key")
 	if err != nil {
 		return fmt.Errorf("meta: %w", err)
 	}
@@ -184,8 +188,8 @@ func dumpOne(dbPath string, out io.Writer, opts *DumpOptions) error {
 		return err
 	}
 
-	// Blobs table
-	blobRows, err := conn.Query("SELECT id, data FROM blobs")
+	// Blobs table (ORDER BY rowid = insertion order, closest to "order they happened")
+	blobRows, err := conn.Query("SELECT id, data FROM blobs ORDER BY rowid")
 	if err != nil {
 		return fmt.Errorf("blobs: %w", err)
 	}
@@ -206,23 +210,33 @@ func dumpOne(dbPath string, out io.Writer, opts *DumpOptions) error {
 
 const maxPreviewLen = 800
 const maxExtractedLineLen = 400
-const byteDumpWidth = 76 // bytes per line in byte dump (printable ASCII or '.')
+const defaultByteDumpWidth = 76 // bytes per line when terminal width unknown or not a TTY
 
 // byteDump returns lines that dump each byte: printable US-ASCII (32-126) as the
-// character, others as '.'. Each line is prefixed with "  │ " and wrapped at byteDumpWidth.
-func byteDump(data []byte) []string {
+// character, others as '.'. Each line starts with a hex offset (like od -A x) then the bytes.
+// If width <= 0, defaultByteDumpWidth is used. Width is forced to be even so hex pairs never split across lines.
+// When the buffer is larger than width, a blank line is prepended so the dump starts on its own line.
+func byteDump(data []byte, width int) []string {
+	if width <= 0 {
+		width = defaultByteDumpWidth
+	}
+	width = width & ^1 // even
 	if len(data) == 0 {
 		return []string{"  │ (empty)"}
 	}
 	var lines []string
-	for i := 0; i < len(data); i += byteDumpWidth {
-		end := i + byteDumpWidth
+	if len(data) > width {
+		lines = append(lines, "")
+	}
+	for i := 0; i < len(data); i += width {
+		end := i + width
 		if end > len(data) {
 			end = len(data)
 		}
 		row := data[i:end]
 		var b strings.Builder
 		b.WriteString("  │ ")
+		b.WriteString(fmt.Sprintf("%04x ", i))
 		for _, c := range row {
 			if c >= 32 && c <= 126 {
 				b.WriteByte(c)
@@ -262,7 +276,11 @@ func formatBlob(id string, data []byte, opts *DumpOptions) []string {
 		_, file, line, _ := runtime.Caller(0)
 		atLine := filepath.Base(file) + ":" + strconv.Itoa(line)
 		extracted := ExtractStringsFromBinary(data)
-		lines := make([]string, 0, 4+len(extracted)+ (len(data)/byteDumpWidth)+1)
+		width := defaultByteDumpWidth
+		if opts != nil && opts.ByteDumpWidth > 0 {
+			width = opts.ByteDumpWidth
+		}
+		lines := make([]string, 0, 4+len(extracted)+(len(data)/width)+1)
 		if len(extracted) == 0 {
 			lines = append(lines, fmt.Sprintf("[binary blob id=%s len=%d] (invalid utf8 sequence)", id, len(data)))
 			lines = append(lines, "  at "+atLine+" - invalid utf8 sequence")
@@ -274,9 +292,12 @@ func formatBlob(id string, data []byte, opts *DumpOptions) []string {
 				}
 				lines = append(lines, "  │ "+s)
 			}
-			lines = append(lines, "  at "+atLine+" - invalid utf8 sequence (extracted above; raw byte dump below)")
+			lines = append(lines, "  at "+atLine+" - invalid utf8 sequence (extracted above; wire dump and raw byte dump below)")
 		}
-		lines = append(lines, byteDump(data)...)
+		lines = append(lines, "  ── protobuf wire dump (what the first bytes represent) ──")
+		lines = append(lines, WireDump(data)...)
+		lines = append(lines, "  ── raw byte dump ──")
+		lines = append(lines, byteDump(data, width)...)
 		return lines
 	}
 

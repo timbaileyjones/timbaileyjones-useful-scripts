@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/timbaileyjones/cursorchats/internal/db"
+	"golang.org/x/term"
 )
 
 func main() {
@@ -31,6 +32,14 @@ func main() {
 	}
 
 	opts := &db.DumpOptions{Color: *colorFlag}
+	// Use terminal width for byte dump when stdout is a TTY (leave room for "  │ " + "0000 " offset prefix)
+	if *outputPath == "" {
+		if fd := int(os.Stdout.Fd()); term.IsTerminal(fd) {
+			if w, _, err := term.GetSize(fd); err == nil && w > 9 {
+				opts.ByteDumpWidth = (w - 9) & ^1 // 9 = offset prefix; even so hex pairs never split
+			}
+		}
+	}
 	if err := db.DumpAll(*chatsDir, out, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
