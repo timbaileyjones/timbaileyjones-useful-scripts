@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -205,6 +206,34 @@ func dumpOne(dbPath string, out io.Writer, opts *DumpOptions) error {
 
 const maxPreviewLen = 800
 const maxExtractedLineLen = 400
+const byteDumpWidth = 76 // bytes per line in byte dump (printable ASCII or '.')
+
+// byteDump returns lines that dump each byte: printable US-ASCII (32-126) as the
+// character, others as '.'. Each line is prefixed with "  │ " and wrapped at byteDumpWidth.
+func byteDump(data []byte) []string {
+	if len(data) == 0 {
+		return []string{"  │ (empty)"}
+	}
+	var lines []string
+	for i := 0; i < len(data); i += byteDumpWidth {
+		end := i + byteDumpWidth
+		if end > len(data) {
+			end = len(data)
+		}
+		row := data[i:end]
+		var b strings.Builder
+		b.WriteString("  │ ")
+		for _, c := range row {
+			if c >= 32 && c <= 126 {
+				b.WriteByte(c)
+			} else {
+				b.WriteByte('.')
+			}
+		}
+		lines = append(lines, b.String())
+	}
+	return lines
+}
 
 func formatBlob(id string, data []byte, opts *DumpOptions) []string {
 	color := opts != nil && opts.Color
@@ -230,18 +259,24 @@ func formatBlob(id string, data []byte, opts *DumpOptions) []string {
 
 	// Binary blob: try to extract UTF-8 strings (protobuf-like).
 	if !utf8.Valid(data) {
+		_, file, line, _ := runtime.Caller(0)
+		atLine := filepath.Base(file) + ":" + strconv.Itoa(line)
 		extracted := ExtractStringsFromBinary(data)
+		lines := make([]string, 0, 4+len(extracted)+ (len(data)/byteDumpWidth)+1)
 		if len(extracted) == 0 {
-			return []string{fmt.Sprintf("[binary blob id=%s len=%d]", id, len(data))}
-		}
-		lines := make([]string, 0, 1+len(extracted))
-		lines = append(lines, fmt.Sprintf("[binary blob id=%s len=%d] (extracted text below)", id, len(data)))
-		for _, s := range extracted {
-			if len(s) > maxExtractedLineLen {
-				s = s[:maxExtractedLineLen] + "..."
+			lines = append(lines, fmt.Sprintf("[binary blob id=%s len=%d] (invalid utf8 sequence)", id, len(data)))
+			lines = append(lines, "  at "+atLine+" - invalid utf8 sequence")
+		} else {
+			lines = append(lines, fmt.Sprintf("[binary blob id=%s len=%d] (extracted text below)", id, len(data)))
+			for _, s := range extracted {
+				if len(s) > maxExtractedLineLen {
+					s = s[:maxExtractedLineLen] + "..."
+				}
+				lines = append(lines, "  │ "+s)
 			}
-			lines = append(lines, "  │ "+s)
+			lines = append(lines, "  at "+atLine+" - invalid utf8 sequence (extracted above; raw byte dump below)")
 		}
+		lines = append(lines, byteDump(data)...)
 		return lines
 	}
 
