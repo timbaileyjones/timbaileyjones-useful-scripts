@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -259,7 +260,13 @@ func formatBlob(id string, data []byte, opts *DumpOptions) []string {
 		preview = strings.TrimSpace(preview)
 		open, close := roleColor(msg.Role)
 		line := open + msg.Role + close + ": " + preview
-		return []string{line}
+		out := []string{line}
+		// Second rendering: expanded line-by-line when content has newlines
+		if strings.Contains(contentStr, "\n") {
+			out = append(out, "  ── full message ("+strconv.Itoa(strings.Count(contentStr, "\n")+1)+" lines) ──")
+			out = append(out, expandMultilineText(contentStr, color)...)
+		}
+		return out
 	}
 
 	// JSON with other shape: pretty-print and optionally syntax-highlight
@@ -281,6 +288,8 @@ func formatBlob(id string, data []byte, opts *DumpOptions) []string {
 		for _, line := range lines {
 			out = append(out, "  │ "+line)
 		}
+		// Second rendering: expand any JSON string fields that contain newlines
+		out = append(out, expandMultilineStringsInJSON(msg.Content, color)...)
 		return out
 	}
 	return []string{fmt.Sprintf("[blob id=%s len=%d]", id, len(data))}
@@ -351,4 +360,94 @@ func extractContentString(raw json.RawMessage) string {
 		}
 	}
 	return b.String()
+}
+
+const expandIndent = "  │     "
+
+// expandMultilineText returns lines for the second rendering: split by \n,
+// each line prefixed with expandIndent. If color is true, syntax-highlights
+// using chroma's Analyse (guesses language from content).
+func expandMultilineText(s string, color bool) []string {
+	display := s
+	if color {
+		display = colorizeByAnalyse(s)
+	}
+	lines := strings.Split(display, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, expandIndent+line)
+	}
+	return out
+}
+
+// colorizeByAnalyse uses chroma's Analyse to guess language and syntax-highlight.
+func colorizeByAnalyse(source string) string {
+	lexer := lexers.Analyse(source)
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+	// Skip highlighting if chroma thinks it's plaintext
+	if lexer.Config().Name == "Fallback" || lexer.Config().Name == "plaintext" {
+		return source
+	}
+	style := styles.Get("monokai")
+	if style == nil {
+		style = styles.Fallback
+	}
+	formatter := formatters.Get("terminal16m")
+	if formatter == nil {
+		formatter = formatters.Fallback
+	}
+	it, err := lexer.Tokenise(nil, source)
+	if err != nil {
+		return source
+	}
+	var buf bytes.Buffer
+	if err := formatter.Format(&buf, style, it); err != nil {
+		return source
+	}
+	return buf.String()
+}
+
+// expandMultilineStringsInJSON walks JSON and finds string values containing \n.
+// For each, appends "  ── path (N lines) ──" and then expanded lines (optionally syntax-highlighted).
+func expandMultilineStringsInJSON(raw []byte, color bool) []string {
+	var v interface{}
+	if json.Unmarshal(raw, &v) != nil {
+		return nil
+	}
+	var blocks []struct{ path, s string }
+	walkJSONForMultilineStrings(v, "", &blocks)
+	if len(blocks) == 0 {
+		return nil
+	}
+	var out []string
+	for _, b := range blocks {
+		n := strings.Count(b.s, "\n") + 1
+		out = append(out, "  ── "+b.path+" ("+strconv.Itoa(n)+" lines) ──")
+		out = append(out, expandMultilineText(b.s, color)...)
+	}
+	return out
+}
+
+func walkJSONForMultilineStrings(v interface{}, path string, blocks *[]struct{ path, s string }) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		for k, child := range val {
+			p := k
+			if path != "" {
+				p = path + "." + k
+			}
+			walkJSONForMultilineStrings(child, p, blocks)
+		}
+	case []interface{}:
+		for i, child := range val {
+			p := path + "[" + strconv.Itoa(i) + "]"
+			walkJSONForMultilineStrings(child, p, blocks)
+		}
+	case string:
+		if strings.Contains(val, "\n") {
+			*blocks = append(*blocks, struct{ path, s string }{path, val})
+		}
+	}
 }
