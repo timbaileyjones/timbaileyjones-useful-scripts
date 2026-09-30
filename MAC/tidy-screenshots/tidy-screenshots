@@ -1,0 +1,101 @@
+#!/bin/bash
+# Keep macOS screenshots and screen recordings on ~/Desktop tidy.
+#
+#   tidy-screenshots rename [dir]  rename captures in place (default: the Desktop)
+#   tidy-screenshots archive [-n]  move captures older than 24h into ~/Desktop/old
+#                                  (-n = dry run)
+#
+# Files are named screenshot-YYYYMMDD-HHMMSS-N.<ext> or recording-...-N.<ext>.
+# The timestamp comes from the capture time in the macOS filename
+# ("Screenshot 2026-09-30 at 12.03.04 PM.png"), falling back to the file's
+# creation time. N starts at 1 and increments to keep names unique across both
+# the Desktop and old/.
+
+set -euo pipefail
+export LC_ALL=C   # byte-wise regex; macOS puts U+202F before AM/PM
+
+src="$HOME/Desktop"
+dest="$src/old"
+
+macos_re='^(Screen ?[Ss]hot|Screen Recording) ([0-9]{4})-([0-9]{2})-([0-9]{2}) at ([0-9]{1,2})\.([0-9]{2})\.([0-9]{2})[^AP]*([AP]M)'
+ours_re='^(screenshot|recording)-([0-9]{8}-[0-9]{6})-[0-9]+\.'
+
+# Print the "<kind>-YYYYMMDD-HHMMSS" base name for a capture path.
+base_for() {
+    local path=$1 name=${1##*/} kind=screenshot h
+    [[ "$name" == *Recording* || "$name" == recording-* ]] && kind=recording
+    if [[ "$name" =~ $ours_re ]]; then
+        echo "$kind-${BASH_REMATCH[2]}"
+    elif [[ "$name" =~ $macos_re ]]; then
+        h=$((10#${BASH_REMATCH[5]}))
+        if [[ ${BASH_REMATCH[8]} == PM && $h -lt 12 ]]; then h=$((h + 12)); fi
+        if [[ ${BASH_REMATCH[8]} == AM && $h -eq 12 ]]; then h=0; fi
+        printf '%s-%s%s%s-%02d%s%s\n' "$kind" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" \
+            "${BASH_REMATCH[4]}" "$h" "${BASH_REMATCH[6]}" "${BASH_REMATCH[7]}"
+    else
+        echo "$kind-$(stat -f %SB -t %Y%m%d-%H%M%S "$path")"
+    fi
+}
+
+ext_for() {
+    tr '[:upper:]' '[:lower:]' <<<"${1##*.}"
+}
+
+# Print the first <base>-N.<ext> name not present in any given dir.
+free_name() {
+    local base=$1 ext=$2 n=1 dir taken
+    shift 2
+    while :; do
+        taken=0
+        for dir in "$@"; do
+            [[ -e "$dir/$base-$n.$ext" ]] && taken=1
+        done
+        ((taken)) || break
+        n=$((n + 1))
+    done
+    echo "$base-$n.$ext"
+}
+
+cmd_rename() {
+    local dir=${1:-$src} path new
+    while IFS= read -r -d '' path; do
+        new=$(free_name "$(base_for "$path")" "$(ext_for "$path")" "$src" "$dest")
+        mv -n "$path" "$dir/$new"
+        echo "$(date '+%F %T') renamed: ${path##*/} -> $new"
+    done < <(find "$dir" -maxdepth 1 -type f \( -name 'Screenshot *' -o -name 'Screen Shot *' \
+        -o -name 'Screen Recording *' \) -print0 | sort -z)
+}
+
+cmd_archive() {
+    local dry_run=0 moved=0 path name new
+    [[ "${1:-}" == "-n" ]] && dry_run=1
+    mkdir -p "$dest"
+    while IFS= read -r -d '' path; do
+        name=${path##*/}
+        if [[ "$name" =~ $ours_re && ! -e "$dest/$name" ]]; then
+            new=$name
+        else
+            new=$(free_name "$(base_for "$path")" "$(ext_for "$path")" "$dest")
+        fi
+        if ((dry_run)); then
+            echo "would move: $name -> old/$new"
+        else
+            mv -n "$path" "$dest/$new"
+            echo "moved: $name -> old/$new"
+        fi
+        moved=$((moved + 1))
+    done < <(find "$src" -maxdepth 1 -type f \( -name 'Screenshot *' -o -name 'Screen Shot *' \
+        -o -name 'Screen Recording *' -o -name 'screenshot-*' -o -name 'recording-*' \) -mmin +1440 -print0 | sort -z)
+    echo "$(date '+%F %T') archived $moved capture(s)"
+}
+
+if ! ls "$src" >/dev/null 2>&1; then
+    echo "$(date '+%F %T') cannot read $src (grant Full Disk Access?)" >&2
+    exit 1
+fi
+
+case "${1:-}" in
+    rename) shift; cmd_rename "$@" ;;
+    archive) shift; cmd_archive "$@" ;;
+    *) echo "usage: ${0##*/} rename [dir] | archive [-n]" >&2; exit 2 ;;
+esac
